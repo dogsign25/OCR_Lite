@@ -10,3 +10,8 @@ outputs/images/*
 !outputs/images/.gitkeep
 outputs/json/*
 !outputs/json/.gitkeep
+
+input/*
+!input/.gitkeep
+batch_outputs/*
+!batch_outputs/.gitkeep

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PDF OCR Converter</title>
+  <link rel="icon" href="{{ url_for('static', path='/favicon.svg') }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
 </head>
 <body>
@@ -11,7 +12,7 @@
     <section class="hero">
       <span class="eyebrow">LOCAL PDF TOOL</span>
       <h1>Turn PDFs into searchable JSON.</h1>
-      <p>Upload one or more PDFs. Every page becomes a PNG, then all page text is combined into one JSON file per PDF.</p>
+      <p>Upload one or more PDFs. Each PNG page is read three ways, then the results are cross-checked into a verified JSON file.</p>
     </section>
 
     <section class="card">

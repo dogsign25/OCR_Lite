@@ -243,6 +243,24 @@ button:disabled {
   text-decoration: none;
 }
 
+.json-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.download-secondary {
+  display: inline-flex;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  background: #fff;
+  font-size: 0.85rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
 .image-links {
   display: flex;
   flex-wrap: wrap;

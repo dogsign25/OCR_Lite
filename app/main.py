@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import re
+import os
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -9,16 +9,18 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
-from app.services.json_writer import write_ocr_result
-from app.services.ocr_service import extract_text
-from app.services.pdf_converter import PdfConversionError, convert_pdf_to_png
+from app.services.document_processor import process_document
+from app.services.naming import safe_stem
+from app.services.pdf_converter import PdfConversionError
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 IMAGE_DIR = BASE_DIR / "outputs" / "images"
 JSON_DIR = BASE_DIR / "outputs" / "json"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+OCR_LANGUAGE = os.getenv("OCR_LANGUAGE", "kor+eng")
 
 for directory in (UPLOAD_DIR, IMAGE_DIR, JSON_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -28,24 +30,27 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "app" / "static"), name="s
 templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
 
 
-def safe_stem(filename: str) -> str:
-    """Return a filesystem-safe base name while preserving Unicode letters."""
-    stem = Path(filename).stem.strip()
-    stem = re.sub(r"[^\w.-]+", "_", stem, flags=re.UNICODE)
-    stem = stem.strip("._")
-    return stem[:120] or "document"
-
-
-def unique_base_name(filename: str) -> str:
+def reserve_upload(filename: str) -> tuple[str, Path]:
     base = safe_stem(filename)
-    occupied = (
-        (UPLOAD_DIR / f"{base}.pdf").exists()
-        or (JSON_DIR / f"{base}.json").exists()
-        or any(IMAGE_DIR.glob(f"{base}(?*"))
-    )
-    if not occupied:
-        return base
-    return f"{base}_{uuid4().hex[:8]}"
+    while True:
+        occupied_outputs = any(JSON_DIR.glob(f"{base}*.json")) or any(
+            IMAGE_DIR.glob(f"{base}(?*")
+        )
+        candidate = f"{base}_{uuid4().hex[:8]}" if occupied_outputs else base
+        destination = UPLOAD_DIR / f"{candidate}.pdf"
+        try:
+            destination.touch(exist_ok=False)
+        except FileExistsError:
+            base = f"{safe_stem(filename)}_{uuid4().hex[:8]}"
+            continue
+        return candidate, destination
+
+
+def cleanup_web_outputs(base_name: str) -> None:
+    for path in IMAGE_DIR.glob(f"{base_name}(*)"):
+        path.unlink(missing_ok=True)
+    for path in JSON_DIR.glob(f"{base_name}*.json"):
+        path.unlink(missing_ok=True)
 
 
 async def save_upload(upload: UploadFile, destination: Path) -> None:
@@ -90,6 +95,8 @@ async def process_pdfs(
 
     invalid = [upload.filename or "unnamed file" for upload in files if not is_pdf(upload)]
     if invalid:
+        for upload in files:
+            await upload.close()
         raise HTTPException(
             status_code=400,
             detail=f"Only PDF files are allowed: {', '.join(invalid)}",
@@ -98,72 +105,80 @@ async def process_pdfs(
     results: list[dict[str, object]] = []
     for upload in files:
         original_name = Path(upload.filename or "document.pdf").name
-        base_name = unique_base_name(original_name)
-        saved_pdf = UPLOAD_DIR / f"{base_name}.pdf"
-        image_paths: list[Path] = []
+        base_name, saved_pdf = reserve_upload(original_name)
 
         try:
             await save_upload(upload, saved_pdf)
-            image_paths = convert_pdf_to_png(saved_pdf, IMAGE_DIR, base_name)
-
-            pages: list[dict[str, object]] = []
-            warnings: list[str] = []
-            for page_number, image_path in enumerate(image_paths, start=1):
-                try:
-                    text = extract_text(image_path)
-                except Exception as exc:
-                    text = ""
-                    message = f"Page {page_number}: OCR failed ({exc})"
-                    warnings.append(message)
-
-                pages.append(
-                    {
-                        "page_number": page_number,
-                        "image_file": image_path.name,
-                        "text": text,
-                    }
-                )
-
-            payload = {
-                "source_pdf": original_name,
-                "total_pages": len(pages),
-                "pages": pages,
-            }
-            json_path = write_ocr_result(payload, JSON_DIR / f"{base_name}.json")
+            processed = await run_in_threadpool(
+                process_document,
+                pdf_path=saved_pdf,
+                image_dir=IMAGE_DIR,
+                json_dir=JSON_DIR,
+                base_name=base_name,
+                source_name=original_name,
+                ocr_language=OCR_LANGUAGE,
+            )
+            json_outputs = [
+                {
+                    "kind": output.kind,
+                    "label": output.label,
+                    "filename": output.path.name,
+                    "download_url": f"/download/json/{output.path.name}",
+                }
+                for output in processed.json_outputs
+            ]
             results.append(
                 {
+                    "status": "completed",
                     "source_pdf": original_name,
                     "saved_pdf": saved_pdf.name,
-                    "total_pages": len(pages),
+                    "total_pages": processed.total_pages,
                     "images": [
                         {
                             "filename": path.name,
                             "download_url": f"/download/image/{path.name}",
                         }
-                        for path in image_paths
+                        for path in processed.image_paths
                     ],
-                    "json_file": json_path.name,
-                    "json_download_url": f"/download/json/{json_path.name}",
-                    "warnings": warnings,
+                    "json_file": processed.verified_json.name,
+                    "json_download_url": (
+                        f"/download/json/{processed.verified_json.name}"
+                    ),
+                    "json_files": json_outputs,
+                    "warnings": processed.warnings,
+                    "review_required_pages": processed.review_required_pages,
                 }
             )
-        except HTTPException:
-            for image_path in image_paths:
-                image_path.unlink(missing_ok=True)
-            raise
-        except PdfConversionError as exc:
+        except HTTPException as exc:
+            cleanup_web_outputs(base_name)
             saved_pdf.unlink(missing_ok=True)
-            raise HTTPException(
-                status_code=422,
-                detail=f"Could not convert {original_name}: {exc}",
-            ) from exc
+            results.append(
+                {
+                    "status": "failed",
+                    "source_pdf": original_name,
+                    "error": str(exc.detail),
+                }
+            )
+        except PdfConversionError as exc:
+            cleanup_web_outputs(base_name)
+            saved_pdf.unlink(missing_ok=True)
+            results.append(
+                {
+                    "status": "failed",
+                    "source_pdf": original_name,
+                    "error": f"Could not convert {original_name}: {exc}",
+                }
+            )
         except Exception as exc:
-            for image_path in image_paths:
-                image_path.unlink(missing_ok=True)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Could not process {original_name}: {exc}",
-            ) from exc
+            cleanup_web_outputs(base_name)
+            saved_pdf.unlink(missing_ok=True)
+            results.append(
+                {
+                    "status": "failed",
+                    "source_pdf": original_name,
+                    "error": f"Could not process {original_name}: {exc}",
+                }
+            )
 
     return {"results": results}
 

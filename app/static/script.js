@@ -69,14 +69,38 @@ function showResults(results) {
     const title = document.createElement("h3");
     title.textContent = result.source_pdf;
 
+    if (result.status === "failed") {
+      const error = document.createElement("p");
+      error.className = "warnings";
+      error.textContent = result.error || "Processing failed.";
+      card.append(title, error);
+      resultList.append(card);
+      return;
+    }
+
     const meta = document.createElement("p");
     meta.className = "result-meta";
-    meta.textContent = `${result.total_pages} page${result.total_pages === 1 ? "" : "s"} processed`;
+    const reviewCount = result.review_required_pages || 0;
+    meta.textContent = `${result.total_pages} page${result.total_pages === 1 ? "" : "s"} processed`
+      + (reviewCount ? `, ${reviewCount} page${reviewCount === 1 ? "" : "s"} need review` : "");
 
-    const jsonLink = document.createElement("a");
-    jsonLink.className = "download-primary";
-    jsonLink.href = result.json_download_url;
-    jsonLink.textContent = `Download ${result.json_file}`;
+    const jsonLinks = document.createElement("div");
+    jsonLinks.className = "json-links";
+    const outputs = result.json_files || [{
+      kind: "verified",
+      label: "OCR result",
+      filename: result.json_file,
+      download_url: result.json_download_url,
+    }];
+    outputs.forEach((output) => {
+      const link = document.createElement("a");
+      link.className = output.kind === "verified"
+        ? "download-primary"
+        : "download-secondary";
+      link.href = output.download_url;
+      link.textContent = `${output.label} (${output.filename})`;
+      jsonLinks.append(link);
+    });
 
     const imageLinks = document.createElement("div");
     imageLinks.className = "image-links";
@@ -87,7 +111,7 @@ function showResults(results) {
       imageLinks.append(link);
     });
 
-    card.append(title, meta, jsonLink, imageLinks);
+    card.append(title, meta, jsonLinks, imageLinks);
 
     if (result.warnings.length) {
       const warnings = document.createElement("p");
@@ -136,9 +160,14 @@ form.addEventListener("submit", (event) => {
   request.addEventListener("load", () => {
     submitButton.disabled = false;
     if (request.status >= 200 && request.status < 300) {
+      const results = JSON.parse(request.responseText).results;
+      const failedCount = results.filter((result) => result.status === "failed").length;
       progressBar.style.width = "100%";
-      statusMessage.textContent = "Processing complete.";
-      showResults(JSON.parse(request.responseText).results);
+      statusMessage.textContent = failedCount
+        ? `Processing finished with ${failedCount} failed file${failedCount === 1 ? "" : "s"}.`
+        : "Processing complete.";
+      statusMessage.className = failedCount ? "error" : "";
+      showResults(results);
       return;
     }
 
