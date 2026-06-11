@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF OCR Converter</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+</head>
+<body>
+  <main class="container">
+    <section class="hero">
+      <span class="eyebrow">LOCAL PDF TOOL</span>
+      <h1>Turn PDFs into searchable JSON.</h1>
+      <p>Upload one or more PDFs. Every page becomes a PNG, then all page text is combined into one JSON file per PDF.</p>
+    </section>
+
+    <section class="card">
+      <form id="upload-form">
+        <label class="drop-zone" id="drop-zone" for="pdf-files">
+          <input id="pdf-files" name="files" type="file" accept=".pdf,application/pdf" multiple required>
+          <span class="upload-icon">PDF</span>
+          <strong>Choose PDF files</strong>
+          <span>or drag and drop them here</span>
+          <small>Maximum 50 MB per file</small>
+        </label>
+
+        <div id="file-list" class="file-list" aria-live="polite"></div>
+        <button id="submit-button" type="submit">Convert and run OCR</button>
+
+        <div id="progress-wrap" class="progress-wrap hidden">
+          <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+          <p id="status-message">Uploading files...</p>
+        </div>
+      </form>
+    </section>
+
+    <section id="results" class="results hidden" aria-live="polite">
+      <div class="section-heading">
+        <span class="eyebrow">OUTPUTS</span>
+        <h2>Processing results</h2>
+      </div>
+      <div id="result-list"></div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', path='/script.js') }}"></script>
+</body>
+</html>

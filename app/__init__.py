@@ -1,0 +1,1 @@
+"""PDF OCR web application."""
