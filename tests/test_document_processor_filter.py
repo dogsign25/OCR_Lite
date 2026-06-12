@@ -47,6 +47,7 @@ class DocumentProcessorFilterTests(unittest.TestCase):
                     return OcrResult("승인 완료 문서", 95.0)
                 return OcrResult("일반 페이지", 90.0)
 
+            progress_updates: list[tuple[float, str]] = []
             with (
                 patch(
                     "app.services.document_processor.validate_ocr_language"
@@ -67,6 +68,9 @@ class DocumentProcessorFilterTests(unittest.TestCase):
                     base_name="source",
                     filter_terms=("승인 완료",),
                     filtered_pdf_path=filtered_pdf,
+                    progress_callback=lambda fraction, message: (
+                        progress_updates.append((fraction, message))
+                    ),
                 )
 
             self.assertEqual(result.source_total_pages, 3)
@@ -89,6 +93,77 @@ class DocumentProcessorFilterTests(unittest.TestCase):
                 payload["pages"][0]["matched_filter_terms"],
                 ["승인 완료"],
             )
+            fractions = [fraction for fraction, _ in progress_updates]
+            self.assertEqual(fractions[-1], 1.0)
+            self.assertEqual(fractions, sorted(fractions))
+
+    def test_all_mode_and_exclude_words_control_retained_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_pdf = root / "source.pdf"
+            image_dir = root / "images"
+            json_dir = root / "json"
+            filtered_pdf = root / "filtered.pdf"
+            source = fitz.open()
+            for page_number in range(1, 4):
+                page = source.new_page()
+                page.insert_text((72, 72), f"source page {page_number}")
+            source.save(source_pdf)
+            source.close()
+
+            image_dir.mkdir()
+            image_paths = [
+                image_dir / f"source({page_number}).png"
+                for page_number in range(1, 4)
+            ]
+            for image_path in image_paths:
+                image_path.write_bytes(b"placeholder")
+
+            page_texts = {
+                "source(1).png": "invoice approved",
+                "source(2).png": "invoice",
+                "source(3).png": "invoice approved draft",
+            }
+
+            def fake_ocr(image_path: Path, **_: object) -> OcrResult:
+                return OcrResult(page_texts[image_path.name], 95.0)
+
+            with (
+                patch(
+                    "app.services.document_processor.validate_ocr_language"
+                ),
+                patch(
+                    "app.services.document_processor.convert_pdf_to_png",
+                    return_value=image_paths,
+                ),
+                patch(
+                    "app.services.document_processor.extract_ocr_result",
+                    side_effect=fake_ocr,
+                ),
+            ):
+                result = process_document(
+                    pdf_path=source_pdf,
+                    image_dir=image_dir,
+                    json_dir=json_dir,
+                    base_name="source",
+                    filter_terms=("invoice", "approved"),
+                    filter_match_mode="all",
+                    exclude_terms=("draft",),
+                    filtered_pdf_path=filtered_pdf,
+                )
+
+            self.assertEqual(
+                [path.name for path in result.image_paths],
+                ["source(1).png"],
+            )
+            payload = json.loads(result.verified_json.read_text(encoding="utf-8"))
+            self.assertEqual(payload["page_filter"]["match_mode"], "all")
+            self.assertEqual(payload["page_filter"]["exclude_terms"], ["draft"])
+            self.assertEqual(payload["pages"][0]["matched_filter_terms"], [
+                "invoice",
+                "approved",
+            ])
+            self.assertEqual(payload["pages"][0]["excluded_filter_terms"], [])
 
 
 if __name__ == "__main__":

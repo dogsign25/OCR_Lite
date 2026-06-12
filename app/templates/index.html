@@ -11,8 +11,8 @@
   <main class="container">
     <section class="hero">
       <span class="eyebrow">LOCAL PDF TOOL</span>
-      <h1>Turn PDFs into searchable JSON.</h1>
-      <p>Upload one or more PDFs. Each PNG page is read three ways, then the results are cross-checked into a verified JSON file.</p>
+      <h1>Turn PDFs into searchable documents.</h1>
+      <p>Upload PDFs, filter pages, correct OCR text, and download searchable PDFs with verified JSON results.</p>
     </section>
 
     <section class="card">
@@ -27,15 +27,48 @@
 
         <div id="file-list" class="file-list" aria-live="polite"></div>
         <label class="filter-field" for="filter-words">
-          <strong>Page filter words (optional)</strong>
+          <strong>Include words (optional)</strong>
           <textarea
             id="filter-words"
             name="filter_words"
             rows="3"
             placeholder="invoice, approved&#10;Separate words with commas or new lines"
           ></textarea>
-          <small>Only pages containing at least one word will remain in the filtered PDF.</small>
         </label>
+        <label class="filter-field" for="filter-mode">
+          <strong>Include condition</strong>
+          <select id="filter-mode" name="filter_mode">
+            <option value="any">OR - keep pages containing any word</option>
+            <option value="all">AND - keep pages containing every word</option>
+          </select>
+        </label>
+        <label class="filter-field" for="exclude-words">
+          <strong>Exclude words (optional)</strong>
+          <textarea
+            id="exclude-words"
+            name="exclude_words"
+            rows="3"
+            placeholder="draft, confidential&#10;Pages containing any excluded word are removed"
+          ></textarea>
+          <small>Exclude words take priority over the include condition.</small>
+        </label>
+        <div class="preset-panel">
+          <label for="filter-preset">
+            <strong>Saved filter preset</strong>
+            <select id="filter-preset">
+              <option value="">Choose a saved preset</option>
+            </select>
+          </label>
+          <label for="preset-name">
+            <strong>Preset name</strong>
+            <input id="preset-name" type="text" maxlength="80" placeholder="Monthly invoices">
+          </label>
+          <div class="preset-actions">
+            <button id="save-preset" class="secondary-button" type="button">Save current filter</button>
+            <button id="delete-preset" class="danger-button" type="button">Delete preset</button>
+          </div>
+          <p id="preset-status" class="inline-status" aria-live="polite"></p>
+        </div>
         <button id="submit-button" type="submit">Convert and run OCR</button>
 
         <div id="progress-wrap" class="progress-wrap hidden">

@@ -8,11 +8,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from app.services.artifact_transaction import preserve_artifacts
 from app.services.document_processor import PIPELINE_VERSION, process_document
 from app.services.json_writer import write_ocr_result
 from app.services.naming import safe_stem
 from app.services.ocr_service import OCR_PROFILES
-from app.services.page_filter import normalize_filter_terms
+from app.services.page_filter import (
+    FILTER_MATCH_MODES,
+    normalize_filter_terms,
+    validate_filter_match_mode,
+)
+from app.services.result_bundle import (
+    BundleFile,
+    result_bundle_is_valid,
+    write_result_bundle,
+)
 
 
 @dataclass(frozen=True)
@@ -24,6 +34,8 @@ class BatchItem:
     source_total_pages: int = 0
     verified_json: str = ""
     filtered_pdf: str = ""
+    searchable_pdf: str = ""
+    result_zip: str = ""
     warning_count: int = 0
     review_required_pages: int = 0
     error: str = ""
@@ -78,26 +90,56 @@ def parse_args() -> argparse.Namespace:
             "Repeat the option to register multiple words."
         ),
     )
+    parser.add_argument(
+        "--filter-mode",
+        choices=FILTER_MATCH_MODES,
+        default="any",
+        help=(
+            "Match any registered filter word or require all words "
+            "(default: any)"
+        ),
+    )
+    parser.add_argument(
+        "--exclude-word",
+        action="append",
+        default=[],
+        help=(
+            "Remove pages containing this OCR text. "
+            "Repeat the option to register multiple words."
+        ),
+    )
     return parser.parse_args()
 
 
-def discover_pdfs(input_dir: Path, recursive: bool) -> list[Path]:
+def discover_pdfs(
+    input_dir: Path,
+    recursive: bool,
+    excluded_dir: Path | None = None,
+) -> list[Path]:
     pattern = "**/*" if recursive else "*"
     return sorted(
         path
         for path in input_dir.glob(pattern)
-        if path.is_file() and path.suffix.casefold() == ".pdf"
+        if (
+            path.is_file()
+            and path.suffix.casefold() == ".pdf"
+            and (
+                excluded_dir is None
+                or not path.resolve().is_relative_to(excluded_dir)
+            )
+        )
     )
 
 
 def assign_output_names(pdf_paths: list[Path], input_dir: Path) -> dict[Path, str]:
     grouped: dict[str, list[Path]] = {}
     for pdf_path in pdf_paths:
-        grouped.setdefault(safe_stem(pdf_path.name), []).append(pdf_path)
+        grouped.setdefault(safe_stem(pdf_path.name).casefold(), []).append(pdf_path)
 
     names: dict[Path, str] = {}
-    for base_name, matching_paths in grouped.items():
+    for matching_paths in grouped.values():
         for pdf_path in matching_paths:
+            base_name = safe_stem(pdf_path.name)
             if len(matching_paths) == 1:
                 names[pdf_path] = base_name
                 continue
@@ -112,10 +154,26 @@ def clear_generated_files(document_dir: Path) -> None:
         "images/*.png",
         "json/*.json",
         "*.filtered.pdf",
+        "*.searchable.pdf",
+        "*.results.zip",
         "manifest.json",
     ):
         for path in document_dir.glob(pattern):
             path.unlink()
+
+
+def generated_files(document_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    for pattern in (
+        "images/*.png",
+        "json/*.json",
+        "*.filtered.pdf",
+        "*.searchable.pdf",
+        "*.results.zip",
+        "manifest.json",
+    ):
+        paths.extend(path for path in document_dir.glob(pattern) if path.is_file())
+    return paths
 
 
 def source_fingerprint(pdf_path: Path) -> dict[str, object]:
@@ -133,11 +191,15 @@ def source_fingerprint(pdf_path: Path) -> dict[str, object]:
 def pipeline_settings(
     language: str,
     filter_terms: tuple[str, ...] = (),
+    filter_match_mode: str = "any",
+    exclude_terms: tuple[str, ...] = (),
 ) -> dict[str, object]:
     return {
         "pipeline_version": PIPELINE_VERSION,
         "ocr_language": language,
         "filter_terms": list(normalize_filter_terms(filter_terms)),
+        "filter_match_mode": validate_filter_match_mode(filter_match_mode),
+        "exclude_terms": list(normalize_filter_terms(exclude_terms)),
         "profiles": [
             {"name": profile.name, "config": profile.config}
             for profile in OCR_PROFILES
@@ -166,6 +228,8 @@ def load_reusable_manifest(
             "total_pages",
             "source_total_pages",
             "verified_json",
+            "searchable_pdf",
+            "result_zip",
             "warning_count",
             "review_required_pages",
         )
@@ -177,10 +241,17 @@ def load_reusable_manifest(
             return None
         if str(result["verified_json"]) not in output_files:
             return None
+        if str(result["searchable_pdf"]) not in output_files:
+            return None
+        if str(result["result_zip"]) not in output_files:
+            return None
         filtered_pdf = result.get("filtered_pdf", "")
         if filtered_pdf and str(filtered_pdf) not in output_files:
             return None
-        if settings.get("filter_terms") and not filtered_pdf:
+        filter_enabled = bool(
+            settings.get("filter_terms") or settings.get("exclude_terms")
+        )
+        if filter_enabled and not filtered_pdf:
             return None
         for field in (
             "total_pages",
@@ -196,6 +267,26 @@ def load_reusable_manifest(
             candidate = (document_dir / relative_name).resolve()
             if not candidate.is_relative_to(document_dir) or not candidate.is_file():
                 return None
+        expected_bundle_files: list[BundleFile] = []
+        for relative_name in output_files:
+            path = Path(relative_name)
+            if relative_name == str(result["result_zip"]):
+                continue
+            if path.parts and path.parts[0] in ("images", "json"):
+                expected_bundle_files.append(
+                    BundleFile(document_dir / path, path.parts[0])
+                )
+            elif path.suffix.casefold() == ".pdf" and len(path.parts) == 1:
+                expected_bundle_files.append(
+                    BundleFile(document_dir / path, "pdf")
+                )
+            else:
+                return None
+        if not result_bundle_is_valid(
+            document_dir / str(result["result_zip"]),
+            expected_bundle_files,
+        ):
+            return None
         return manifest
     except (KeyError, OSError, TypeError, ValueError):
         return None
@@ -208,6 +299,8 @@ def process_batch_item(
     language: str,
     overwrite: bool,
     filter_terms: tuple[str, ...] = (),
+    filter_match_mode: str = "any",
+    exclude_terms: tuple[str, ...] = (),
 ) -> BatchItem:
     document_dir = output_root / output_name
     image_dir = document_dir / "images"
@@ -216,7 +309,12 @@ def process_batch_item(
 
     try:
         fingerprint = source_fingerprint(pdf_path)
-        settings = pipeline_settings(language, filter_terms)
+        settings = pipeline_settings(
+            language,
+            filter_terms,
+            filter_match_mode,
+            exclude_terms,
+        )
         manifest = (
             None
             if overwrite
@@ -236,53 +334,93 @@ def process_batch_item(
                     if result.get("filtered_pdf")
                     else ""
                 ),
+                searchable_pdf=str(
+                    document_dir / str(result["searchable_pdf"])
+                ),
+                result_zip=str(document_dir / str(result["result_zip"])),
                 warning_count=int(result["warning_count"]),
                 review_required_pages=int(result["review_required_pages"]),
             )
 
-        clear_generated_files(document_dir)
-        processed = process_document(
-            pdf_path=pdf_path,
-            image_dir=image_dir,
-            json_dir=json_dir,
-            base_name=output_name,
-            source_name=pdf_path.name,
-            ocr_language=language,
-            filter_terms=filter_terms,
-            filtered_pdf_path=document_dir / f"{output_name}.filtered.pdf",
-        )
-        generated_paths = (
-            [*processed.image_paths]
-            + [output.path for output in processed.json_outputs]
-            + ([processed.filtered_pdf] if processed.filtered_pdf else [])
-        )
-        output_files = [
-            str(path.relative_to(document_dir))
-            for path in generated_paths
-        ]
-        manifest_payload = {
-            "status": "completed",
-            "source": fingerprint,
-            "settings": settings,
-            "result": {
-                "total_pages": processed.total_pages,
-                "source_total_pages": processed.source_total_pages,
-                "verified_json": str(
-                    processed.verified_json.relative_to(document_dir)
-                ),
-                "filtered_pdf": (
-                    str(processed.filtered_pdf.relative_to(document_dir))
-                    if processed.filtered_pdf
-                    else ""
-                ),
-                "warning_count": len(processed.warnings),
-                "review_required_pages": processed.review_required_pages,
-                "output_files": output_files,
-            },
-        }
-        write_ocr_result(manifest_payload, manifest_path)
+        with preserve_artifacts(generated_files(document_dir)):
+            clear_generated_files(document_dir)
+            try:
+                processed = process_document(
+                    pdf_path=pdf_path,
+                    image_dir=image_dir,
+                    json_dir=json_dir,
+                    base_name=output_name,
+                    source_name=pdf_path.name,
+                    ocr_language=language,
+                    filter_terms=filter_terms,
+                    filter_match_mode=filter_match_mode,
+                    exclude_terms=exclude_terms,
+                    filtered_pdf_path=document_dir / f"{output_name}.filtered.pdf",
+                    searchable_pdf_path=document_dir / f"{output_name}.searchable.pdf",
+                )
+                generated_paths = (
+                    [*processed.image_paths]
+                    + [output.path for output in processed.json_outputs]
+                    + ([processed.filtered_pdf] if processed.filtered_pdf else [])
+                    + ([processed.searchable_pdf] if processed.searchable_pdf else [])
+                )
+                result_zip = write_result_bundle(
+                    document_dir / f"{output_name}.results.zip",
+                    [
+                        *(
+                            BundleFile(path, "images")
+                            for path in processed.image_paths
+                        ),
+                        *(
+                            BundleFile(output.path, "json")
+                            for output in processed.json_outputs
+                        ),
+                        *(
+                            [BundleFile(processed.filtered_pdf, "pdf")]
+                            if processed.filtered_pdf
+                            else []
+                        ),
+                        *(
+                            [BundleFile(processed.searchable_pdf, "pdf")]
+                            if processed.searchable_pdf
+                            else []
+                        ),
+                    ],
+                )
+                generated_paths.append(result_zip)
+                output_files = [
+                    str(path.relative_to(document_dir))
+                    for path in generated_paths
+                ]
+                manifest_payload = {
+                    "status": "completed",
+                    "source": fingerprint,
+                    "settings": settings,
+                    "result": {
+                        "total_pages": processed.total_pages,
+                        "source_total_pages": processed.source_total_pages,
+                        "verified_json": str(
+                            processed.verified_json.relative_to(document_dir)
+                        ),
+                        "filtered_pdf": (
+                            str(processed.filtered_pdf.relative_to(document_dir))
+                            if processed.filtered_pdf
+                            else ""
+                        ),
+                        "searchable_pdf": str(
+                            processed.searchable_pdf.relative_to(document_dir)
+                        ),
+                        "result_zip": str(result_zip.relative_to(document_dir)),
+                        "warning_count": len(processed.warnings),
+                        "review_required_pages": processed.review_required_pages,
+                        "output_files": output_files,
+                    },
+                }
+                write_ocr_result(manifest_payload, manifest_path)
+            except Exception:
+                clear_generated_files(document_dir)
+                raise
     except Exception as exc:
-        clear_generated_files(document_dir)
         return BatchItem(
             source_pdf=str(pdf_path),
             output_directory=str(document_dir),
@@ -298,6 +436,8 @@ def process_batch_item(
         source_total_pages=processed.source_total_pages,
         verified_json=str(processed.verified_json),
         filtered_pdf=str(processed.filtered_pdf or ""),
+        searchable_pdf=str(processed.searchable_pdf or ""),
+        result_zip=str(result_zip),
         warning_count=len(processed.warnings),
         review_required_pages=processed.review_required_pages,
     )
@@ -327,13 +467,21 @@ def main() -> int:
         raise SystemExit("--workers must be at least 1")
     if not input_dir.is_dir():
         raise SystemExit(f"Input directory does not exist: {input_dir}")
+    if output_dir == input_dir:
+        raise SystemExit("--output-dir must be different from the input directory")
 
-    pdf_paths = discover_pdfs(input_dir, args.recursive)
+    excluded_dir = (
+        output_dir
+        if output_dir.is_relative_to(input_dir)
+        else None
+    )
+    pdf_paths = discover_pdfs(input_dir, args.recursive, excluded_dir)
     if not pdf_paths:
         raise SystemExit(f"No PDF files found in: {input_dir}")
 
     output_names = assign_output_names(pdf_paths, input_dir)
     filter_terms = normalize_filter_terms(args.filter_word)
+    exclude_terms = normalize_filter_terms(args.exclude_word)
     print(
         f"Processing {len(pdf_paths)} PDF file(s) with "
         f"{args.workers} worker(s)..."
@@ -350,6 +498,8 @@ def main() -> int:
                 args.language,
                 args.overwrite,
                 filter_terms,
+                args.filter_mode,
+                exclude_terms,
             ): pdf_path
             for pdf_path in pdf_paths
         }

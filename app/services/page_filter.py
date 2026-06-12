@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 import fitz
+
+FILTER_MATCH_MODES = ("any", "all")
 
 
 class PageFilterError(RuntimeError):
     """Raised when a filtered PDF cannot be created."""
 
 
+@dataclass(frozen=True)
+class PageFilterDecision:
+    keep: bool
+    matched_terms: tuple[str, ...]
+    excluded_terms: tuple[str, ...]
+
+
 def normalize_filter_terms(terms: Iterable[str]) -> tuple[str, ...]:
     normalized: list[str] = []
     seen: set[str] = set()
     for term in terms:
-        cleaned = " ".join(term.split())
+        cleaned = unicodedata.normalize("NFKC", " ".join(term.split()))
         key = cleaned.casefold()
         if not cleaned or key in seen:
             continue
@@ -33,7 +44,7 @@ def find_matching_terms(
     filter_terms: Iterable[str],
 ) -> list[str]:
     searchable_texts = [
-        " ".join(text.split()).casefold()
+        unicodedata.normalize("NFKC", " ".join(text.split())).casefold()
         for text in texts
         if text.strip()
     ]
@@ -44,6 +55,43 @@ def find_matching_terms(
     ]
 
 
+def validate_filter_match_mode(match_mode: str) -> str:
+    normalized = match_mode.strip().casefold()
+    if normalized not in FILTER_MATCH_MODES:
+        supported = ", ".join(FILTER_MATCH_MODES)
+        raise ValueError(f"Filter match mode must be one of: {supported}")
+    return normalized
+
+
+def evaluate_page_filter(
+    texts: Iterable[str],
+    filter_terms: Iterable[str] = (),
+    match_mode: str = "any",
+    exclude_terms: Iterable[str] = (),
+) -> PageFilterDecision:
+    active_terms = normalize_filter_terms(filter_terms)
+    active_exclude_terms = normalize_filter_terms(exclude_terms)
+    normalized_mode = validate_filter_match_mode(match_mode)
+    page_texts = tuple(texts)
+    matched_terms = tuple(find_matching_terms(page_texts, active_terms))
+    excluded_terms = tuple(
+        find_matching_terms(page_texts, active_exclude_terms)
+    )
+
+    if not active_terms:
+        include_matches = True
+    elif normalized_mode == "all":
+        include_matches = len(matched_terms) == len(active_terms)
+    else:
+        include_matches = bool(matched_terms)
+
+    return PageFilterDecision(
+        keep=include_matches and not excluded_terms,
+        matched_terms=matched_terms,
+        excluded_terms=excluded_terms,
+    )
+
+
 def write_filtered_pdf(
     source_pdf: Path,
     output_pdf: Path,
@@ -51,7 +99,9 @@ def write_filtered_pdf(
 ) -> Path:
     selected_pages = list(page_numbers)
     if not selected_pages:
-        raise PageFilterError("No pages matched the registered filter words.")
+        raise PageFilterError(
+            "No pages satisfied the registered filter conditions."
+        )
     if len(selected_pages) != len(set(selected_pages)):
         raise PageFilterError("Filtered PDF page numbers must be unique.")
 

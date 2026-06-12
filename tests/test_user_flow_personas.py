@@ -92,6 +92,8 @@ class BatchOperatorPersonaTests(unittest.TestCase):
                 json_dir.mkdir(parents=True, exist_ok=True)
                 verified_path = json_dir / f"{base_name}.verified.json"
                 verified_path.write_text("{}\n", encoding="utf-8")
+                searchable_pdf = Path(kwargs["searchable_pdf_path"])
+                searchable_pdf.write_bytes(b"%PDF-searchable")
                 return ProcessedDocument(
                     source_pdf=pdf_path.name,
                     image_paths=[image_path],
@@ -101,6 +103,7 @@ class BatchOperatorPersonaTests(unittest.TestCase):
                     warnings=[],
                     review_required_pages=0,
                     source_total_pages=1,
+                    searchable_pdf=searchable_pdf,
                 )
 
             with patch(
@@ -139,6 +142,51 @@ class BatchOperatorPersonaTests(unittest.TestCase):
             self.assertFalse((output_dir / "bad" / "manifest.json").exists())
             self.assertEqual(list((output_dir / "bad" / "images").iterdir()), [])
             self.assertEqual(list((output_dir / "bad" / "json").iterdir()), [])
+
+    def test_failed_reprocessing_preserves_last_successful_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_pdf = root / "source.pdf"
+            source_pdf.write_bytes(b"new source")
+            document_dir = root / "output" / "source"
+            image_dir = document_dir / "images"
+            json_dir = document_dir / "json"
+            image_dir.mkdir(parents=True)
+            json_dir.mkdir()
+            old_image = image_dir / "source(1).png"
+            old_json = json_dir / "source.verified.json"
+            old_pdf = document_dir / "source.searchable.pdf"
+            old_zip = document_dir / "source.results.zip"
+            old_manifest = document_dir / "manifest.json"
+            old_image.write_bytes(b"old image")
+            old_json.write_bytes(b"old json")
+            old_pdf.write_bytes(b"old pdf")
+            old_zip.write_bytes(b"old zip")
+            old_manifest.write_bytes(b"old manifest")
+
+            def fail_after_partial_outputs(**_: object) -> ProcessedDocument:
+                old_image.write_bytes(b"partial image")
+                old_json.write_bytes(b"partial json")
+                raise RuntimeError("simulated reprocessing failure")
+
+            with patch(
+                "app.batch.process_document",
+                side_effect=fail_after_partial_outputs,
+            ):
+                item = process_batch_item(
+                    source_pdf,
+                    root / "output",
+                    "source",
+                    "kor+eng",
+                    True,
+                )
+
+            self.assertEqual(item.status, "failed")
+            self.assertEqual(old_image.read_bytes(), b"old image")
+            self.assertEqual(old_json.read_bytes(), b"old json")
+            self.assertEqual(old_pdf.read_bytes(), b"old pdf")
+            self.assertEqual(old_zip.read_bytes(), b"old zip")
+            self.assertEqual(old_manifest.read_bytes(), b"old manifest")
 
 
 class OcrFailurePersonaTests(unittest.TestCase):
@@ -252,7 +300,7 @@ class PageFilterPersonaTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     PageFilterError,
-                    "No pages matched",
+                    "No pages satisfied",
                 ):
                     process_document(
                         pdf_path=source_pdf,
@@ -283,6 +331,64 @@ class WebUserPersonaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Only PDF files", str(invalid.exception.detail))
         self.assertTrue(upload.closed)
 
+        invalid_mode_upload = AsyncUpload("document.pdf", b"pdf")
+        with self.assertRaises(HTTPException) as invalid_mode:
+            await web_app.process_pdfs(  # type: ignore[list-item]
+                files=[invalid_mode_upload],
+                filter_mode="unsupported",
+            )
+        self.assertEqual(invalid_mode.exception.status_code, 400)
+        self.assertTrue(invalid_mode_upload.closed)
+
+    async def test_rejects_excessive_uploads_and_filter_terms(self) -> None:
+        uploads = [
+            AsyncUpload(f"document-{index}.pdf", b"pdf")
+            for index in range(web_app.MAX_UPLOAD_FILES + 1)
+        ]
+        with self.assertRaises(HTTPException) as excessive_files:
+            await web_app.process_pdfs(files=uploads)  # type: ignore[list-item]
+        self.assertEqual(excessive_files.exception.status_code, 400)
+        self.assertTrue(all(upload.closed for upload in uploads))
+
+        upload = AsyncUpload("document.pdf", b"pdf")
+        terms = ",".join(
+            f"term-{index}"
+            for index in range(web_app.MAX_FILTER_TERMS + 1)
+        )
+        with self.assertRaises(HTTPException) as excessive_terms:
+            await web_app.process_pdfs(  # type: ignore[list-item]
+                files=[upload],
+                filter_words=terms,
+            )
+        self.assertEqual(excessive_terms.exception.status_code, 400)
+        self.assertTrue(upload.closed)
+
+    async def test_rejects_duplicate_processing_job_id(self) -> None:
+        progress_store = web_app.ProgressStore()
+        self.assertTrue(progress_store.start("duplicate-job"))
+        upload = AsyncUpload("document.pdf", b"pdf")
+        with (
+            patch.object(web_app, "PROGRESS_STORE", progress_store),
+            self.assertRaises(HTTPException) as duplicate,
+        ):
+            await web_app.process_pdfs(  # type: ignore[list-item]
+                files=[upload],
+                job_id="duplicate-job",
+            )
+        self.assertEqual(duplicate.exception.status_code, 409)
+        self.assertTrue(upload.closed)
+
+    async def test_reports_processing_progress(self) -> None:
+        progress_store = web_app.ProgressStore()
+        progress_store.start("persona-job")
+        progress_store.update("persona-job", 50, "Running OCR")
+        with patch.object(web_app, "PROGRESS_STORE", progress_store):
+            response = await web_app.processing_progress("persona-job")
+
+        self.assertEqual(response["status"], "processing")
+        self.assertEqual(response["percent"], 50.0)
+        self.assertEqual(response["message"], "Running OCR")
+
     async def test_empty_pdf_failure_leaves_no_partial_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -311,6 +417,128 @@ class WebUserPersonaTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(list(image_dir.iterdir()), [])
             self.assertEqual(list(json_dir.iterdir()), [])
             self.assertEqual(list(pdf_dir.iterdir()), [])
+            progress = web_app.PROGRESS_STORE.get(str(response["job_id"]))
+            self.assertEqual(progress["status"], "failed")
+
+    async def test_corrects_ocr_text_and_refreshes_searchable_pdf(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upload_dir = root / "uploads"
+            json_dir = root / "json"
+            pdf_dir = root / "pdfs"
+            zip_dir = root / "zips"
+            for path in (upload_dir, json_dir, pdf_dir, zip_dir):
+                path.mkdir()
+
+            source_pdf = upload_dir / "document.pdf"
+            create_pdf(source_pdf, [""])
+            verified_json = json_dir / "document.verified.json"
+            verified_json.write_text(
+                json.dumps(
+                    {
+                        "verification": {"review_required_pages": 1},
+                        "pages": [
+                            {
+                                "page_number": 1,
+                                "text": "wrong text",
+                                "review_required": True,
+                                "review_reasons": ["low_ocr_confidence"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            async def run_immediately(
+                function: object,
+                *args: object,
+                **kwargs: object,
+            ) -> object:
+                return function(*args, **kwargs)  # type: ignore[operator]
+
+            with (
+                patch.object(web_app, "UPLOAD_DIR", upload_dir),
+                patch.object(web_app, "JSON_DIR", json_dir),
+                patch.object(web_app, "PDF_DIR", pdf_dir),
+                patch.object(web_app, "ZIP_DIR", zip_dir),
+                patch.object(
+                    web_app,
+                    "run_in_threadpool",
+                    new=run_immediately,
+                ),
+            ):
+                response = await web_app.correct_ocr(
+                    "document.verified.json",
+                    web_app.OcrCorrectionRequest(
+                        pages=[
+                            web_app.OcrPageCorrectionRequest(
+                                page_number=1,
+                                text="corrected searchable text",
+                            )
+                        ]
+                    ),
+                )
+
+            self.assertEqual(response["status"], "completed")
+            self.assertEqual(response["review_required_pages"], 0)
+            searchable = fitz.open(pdf_dir / "document.searchable.pdf")
+            self.assertTrue(
+                searchable[0].search_for("corrected searchable text")
+            )
+            searchable.close()
+            self.assertTrue((zip_dir / "document.results.zip").is_file())
+
+    def test_zip_failure_rolls_back_ocr_correction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_pdf = root / "document.pdf"
+            verified_json = root / "document.verified.json"
+            searchable_pdf = root / "document.searchable.pdf"
+            zip_dir = root / "zips"
+            zip_dir.mkdir()
+            result_zip = zip_dir / "document.results.zip"
+            create_pdf(source_pdf, [""])
+            verified_json.write_text(
+                json.dumps(
+                    {
+                        "verification": {"review_required_pages": 1},
+                        "pages": [
+                            {
+                                "page_number": 1,
+                                "text": "old text",
+                                "review_required": True,
+                                "review_reasons": ["low_ocr_confidence"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            searchable_pdf.write_bytes(b"old searchable")
+            result_zip.write_bytes(b"old zip")
+            original_json = verified_json.read_bytes()
+
+            with (
+                patch.object(web_app, "ZIP_DIR", zip_dir),
+                patch.object(
+                    web_app,
+                    "refresh_result_bundle",
+                    side_effect=OSError("zip disk full"),
+                ),
+                self.assertRaisesRegex(OSError, "zip disk full"),
+            ):
+                web_app.correct_document_outputs(
+                    "document",
+                    verified_json,
+                    source_pdf,
+                    searchable_pdf,
+                    [web_app.PageCorrection(1, "new text")],
+                )
+
+            self.assertEqual(verified_json.read_bytes(), original_json)
+            self.assertEqual(searchable_pdf.read_bytes(), b"old searchable")
+            self.assertEqual(result_zip.read_bytes(), b"old zip")
 
 
 if __name__ == "__main__":

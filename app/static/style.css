@@ -153,9 +153,11 @@ h1 {
   margin-top: 18px;
 }
 
-.filter-field textarea {
+.filter-field textarea,
+.filter-field select,
+.preset-panel select,
+.preset-panel input {
   width: 100%;
-  resize: vertical;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -165,13 +167,88 @@ h1 {
   line-height: 1.5;
 }
 
-.filter-field textarea:focus {
+.filter-field textarea {
+  resize: vertical;
+}
+
+.filter-field textarea:focus,
+.filter-field select:focus,
+.preset-panel select:focus,
+.preset-panel input:focus {
   border-color: var(--accent);
   outline: 3px solid rgba(37, 99, 235, 0.12);
 }
 
 .filter-field small {
   color: var(--muted);
+}
+
+.preset-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8faff;
+}
+
+.preset-panel label {
+  display: grid;
+  gap: 8px;
+}
+
+.preset-actions,
+.editor-actions,
+.page-controls,
+.primary-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preset-actions {
+  grid-column: 1 / -1;
+}
+
+.preset-actions button,
+.editor-actions button,
+.page-controls button {
+  width: auto;
+  margin-top: 0;
+}
+
+.secondary-button {
+  color: var(--accent);
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+}
+
+.secondary-button:hover:not(:disabled) {
+  color: #fff;
+}
+
+.danger-button {
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  background: #fff;
+}
+
+.danger-button:hover:not(:disabled) {
+  color: #fff;
+  background: #b91c1c;
+}
+
+.inline-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--success);
+  font-size: 0.84rem;
+}
+
+.inline-status.error {
+  color: #b91c1c;
 }
 
 button {
@@ -272,13 +349,21 @@ button:disabled {
 
 .download-pdf {
   display: inline-flex;
-  margin-bottom: 12px;
+  margin: 0 8px 12px 0;
   padding: 10px 14px;
   border-radius: 9px;
   color: #fff;
   background: var(--accent);
   font-weight: 700;
   text-decoration: none;
+}
+
+.searchable-download {
+  background: var(--success);
+}
+
+.zip-download {
+  background: #7c3aed;
 }
 
 .json-links {
@@ -325,6 +410,130 @@ button:disabled {
   font-size: 0.86rem;
 }
 
+.ocr-editor {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.ocr-editor summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.ocr-editor-fields {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.ocr-page-field {
+  display: grid;
+  gap: 7px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8faff;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.page-header strong {
+  font-size: 0.88rem;
+}
+
+.review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.review-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.review-badge {
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: #9a3412;
+  background: #ffedd5;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.review-badge.reviewed {
+  color: #0f766e;
+  background: #ccfbf1;
+}
+
+.page-preview {
+  display: block;
+  max-width: min(100%, 440px);
+  max-height: 360px;
+  margin: 12px auto;
+  object-fit: contain;
+  transform-origin: center;
+  transition: transform 160ms ease;
+}
+
+.ocr-page-field textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  background: #fff;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.page-controls {
+  margin-top: 4px;
+}
+
+.small-button {
+  padding: 8px 10px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  background: #fff;
+  font-size: 0.8rem;
+}
+
+.small-button:hover:not(:disabled) {
+  color: #fff;
+}
+
+.editor-actions {
+  margin-top: 14px;
+}
+
+.ocr-page-field textarea:focus {
+  border-color: var(--accent);
+  outline: 3px solid rgba(37, 99, 235, 0.12);
+}
+
+.correction-status {
+  margin: 9px 0 0;
+  color: var(--success);
+  font-size: 0.86rem;
+}
+
+.correction-status.error {
+  color: #b91c1c;
+}
+
 .hidden {
   display: none;
 }
@@ -340,5 +549,25 @@ button:disabled {
 
   .drop-zone {
     min-height: 220px;
+  }
+
+  .preset-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .preset-actions,
+  .editor-actions {
+    display: grid;
+  }
+
+  .preset-actions button,
+  .editor-actions button {
+    width: 100%;
+  }
+
+  .page-header,
+  .review-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

@@ -12,6 +12,8 @@ outputs/json/*
 !outputs/json/.gitkeep
 outputs/pdfs/*
 !outputs/pdfs/.gitkeep
+outputs/zips/*
+!outputs/zips/.gitkeep
 
 input/*
 !input/.gitkeep

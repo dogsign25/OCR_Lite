@@ -8,6 +8,7 @@ import fitz
 
 from app.services.page_filter import (
     PageFilterError,
+    evaluate_page_filter,
     find_matching_terms,
     normalize_filter_terms,
     parse_filter_terms,
@@ -36,6 +37,65 @@ class PageFilterTests(unittest.TestCase):
 
         self.assertEqual(matches, ["invoice"])
 
+    def test_any_mode_keeps_page_when_one_term_matches(self) -> None:
+        decision = evaluate_page_filter(
+            ["Invoice Number 42"],
+            ["invoice", "approved"],
+            match_mode="any",
+        )
+
+        self.assertTrue(decision.keep)
+        self.assertEqual(decision.matched_terms, ("invoice",))
+
+    def test_all_mode_combines_matches_from_different_candidates(self) -> None:
+        decision = evaluate_page_filter(
+            ["Invoice Number 42", "Approved by manager"],
+            ["invoice", "approved"],
+            match_mode="all",
+        )
+
+        self.assertTrue(decision.keep)
+        self.assertEqual(decision.matched_terms, ("invoice", "approved"))
+
+    def test_all_mode_rejects_page_with_missing_term(self) -> None:
+        decision = evaluate_page_filter(
+            ["Invoice Number 42"],
+            ["invoice", "approved"],
+            match_mode="all",
+        )
+
+        self.assertFalse(decision.keep)
+
+    def test_exclude_term_overrides_include_match(self) -> None:
+        decision = evaluate_page_filter(
+            ["Approved invoice draft"],
+            ["invoice"],
+            exclude_terms=["draft"],
+        )
+
+        self.assertFalse(decision.keep)
+        self.assertEqual(decision.excluded_terms, ("draft",))
+
+    def test_exclude_only_filter_keeps_unmatched_page(self) -> None:
+        decision = evaluate_page_filter(
+            ["Final invoice"],
+            exclude_terms=["draft"],
+        )
+
+        self.assertTrue(decision.keep)
+
+    def test_rejects_invalid_match_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "any, all"):
+            evaluate_page_filter(["text"], ["text"], match_mode="invalid")
+
+    def test_matches_unicode_compatibility_forms(self) -> None:
+        decision = evaluate_page_filter(
+            ["ＡＰＰＲＯＶＥＤ 문서"],
+            ["APPROVED"],
+        )
+
+        self.assertTrue(decision.keep)
+
     def test_writes_only_selected_pages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -57,7 +117,7 @@ class PageFilterTests(unittest.TestCase):
             filtered.close()
 
     def test_rejects_empty_page_selection(self) -> None:
-        with self.assertRaisesRegex(PageFilterError, "No pages matched"):
+        with self.assertRaisesRegex(PageFilterError, "No pages satisfied"):
             write_filtered_pdf(Path("source.pdf"), Path("filtered.pdf"), [])
 
 

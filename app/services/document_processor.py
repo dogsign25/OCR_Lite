@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from app.services.json_writer import write_ocr_result
 from app.services.ocr_service import (
@@ -12,13 +13,16 @@ from app.services.ocr_service import (
 )
 from app.services.ocr_verifier import select_verified_result
 from app.services.page_filter import (
-    find_matching_terms,
+    evaluate_page_filter,
     normalize_filter_terms,
+    validate_filter_match_mode,
     write_filtered_pdf,
 )
 from app.services.pdf_converter import convert_pdf_to_png
+from app.services.searchable_pdf import SearchablePage, write_searchable_pdf
 
-PIPELINE_VERSION = "4"
+PIPELINE_VERSION = "7"
+ProgressCallback = Callable[[float, str], None]
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,7 @@ class ProcessedDocument:
     review_required_pages: int
     source_total_pages: int
     filtered_pdf: Path | None = None
+    searchable_pdf: Path | None = None
 
     @property
     def total_pages(self) -> int:
@@ -55,19 +60,30 @@ def process_document(
     source_name: str | None = None,
     ocr_language: str = "kor+eng",
     filter_terms: tuple[str, ...] = (),
+    filter_match_mode: str = "any",
+    exclude_terms: tuple[str, ...] = (),
     filtered_pdf_path: Path | None = None,
+    searchable_pdf_path: Path | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProcessedDocument:
     """Convert one PDF and create three OCR candidates plus a verified result."""
     validate_ocr_language(ocr_language)
     source_pdf = source_name or pdf_path.name
     active_filter_terms = normalize_filter_terms(filter_terms)
+    active_exclude_terms = normalize_filter_terms(exclude_terms)
+    active_match_mode = validate_filter_match_mode(filter_match_mode)
+    filter_enabled = bool(active_filter_terms or active_exclude_terms)
     image_paths = convert_pdf_to_png(pdf_path, image_dir, base_name)
+    if progress_callback:
+        progress_callback(0.05, "PDF pages converted to images.")
     source_total_pages = len(image_paths)
     warnings: list[str] = []
     candidate_pages: dict[str, list[dict[str, object]]] = {
         profile.name: [] for profile in OCR_PROFILES
     }
     verified_pages: list[dict[str, object]] = []
+    completed_ocr_runs = 0
+    total_ocr_runs = max(1, source_total_pages * len(OCR_PROFILES))
 
     for page_number, image_path in enumerate(image_paths, start=1):
         page_candidates: dict[str, OcrResult] = {}
@@ -90,11 +106,22 @@ def process_document(
             candidate_pages[profile.name].append(
                 {
                     "page_number": page_number,
+                    "output_page_number": page_number,
+                    "rotation": 0,
                     "image_file": image_path.name,
                     "text": ocr_result.text,
                     "confidence": ocr_result.confidence,
                 }
             )
+            completed_ocr_runs += 1
+            if progress_callback:
+                progress_callback(
+                    0.05 + (0.75 * completed_ocr_runs / total_ocr_runs),
+                    (
+                        f"Running OCR on page {page_number}/{source_total_pages} "
+                        f"with {profile.name}."
+                    ),
+                )
 
         if successful_profiles == 0:
             raise RuntimeError(
@@ -103,9 +130,11 @@ def process_document(
             )
 
         verified = select_verified_result(page_candidates)
-        matched_filter_terms = find_matching_terms(
+        filter_decision = evaluate_page_filter(
             (result.text for result in page_candidates.values()),
-            active_filter_terms,
+            filter_terms=active_filter_terms,
+            match_mode=active_match_mode,
+            exclude_terms=active_exclude_terms,
         )
         review_reasons: list[str] = []
         if not verified.text:
@@ -117,6 +146,8 @@ def process_document(
         verified_pages.append(
             {
                 "page_number": page_number,
+                "output_page_number": page_number,
+                "rotation": 0,
                 "image_file": image_path.name,
                 "text": verified.text,
                 "confidence": verified.confidence,
@@ -125,16 +156,20 @@ def process_document(
                 "selection_score": verified.selection_score,
                 "review_required": bool(review_reasons),
                 "review_reasons": review_reasons,
-                "matched_filter_terms": matched_filter_terms,
+                "filter_matched": filter_decision.keep,
+                "matched_filter_terms": list(filter_decision.matched_terms),
+                "excluded_filter_terms": list(filter_decision.excluded_terms),
             }
         )
 
     filtered_pdf: Path | None = None
-    if active_filter_terms:
+    if filter_enabled:
+        if progress_callback:
+            progress_callback(0.84, "Applying page filter conditions.")
         retained_page_numbers = [
             int(page["page_number"])
             for page in verified_pages
-            if page["matched_filter_terms"]
+            if page["filter_matched"]
         ]
         filtered_pdf = write_filtered_pdf(
             pdf_path,
@@ -168,15 +203,18 @@ def process_document(
             ]
 
     page_filter = {
-        "enabled": bool(active_filter_terms),
+        "enabled": filter_enabled,
         "terms": list(active_filter_terms),
-        "match_mode": "any",
+        "match_mode": active_match_mode,
+        "exclude_terms": list(active_exclude_terms),
         "text_source": "all_ocr_candidates",
         "source_total_pages": source_total_pages,
         "retained_pages": len(verified_pages),
         "discarded_pages": source_total_pages - len(verified_pages),
     }
     json_outputs: list[JsonOutput] = []
+    if progress_callback:
+        progress_callback(0.88, "Writing OCR result files.")
     for index, profile in enumerate(OCR_PROFILES, start=1):
         candidate_payload = {
             "source_pdf": source_pdf,
@@ -232,6 +270,20 @@ def process_document(
             path=verified_path,
         ),
     )
+    searchable_pdf = write_searchable_pdf(
+        pdf_path,
+        searchable_pdf_path
+        or json_dir.parent / f"{base_name}.searchable.pdf",
+        (
+            SearchablePage(
+                page_number=int(page["page_number"]),
+                text=str(page["text"]),
+            )
+            for page in verified_pages
+        ),
+    )
+    if progress_callback:
+        progress_callback(1.0, "Searchable PDF created.")
 
     return ProcessedDocument(
         source_pdf=source_pdf,
@@ -243,4 +295,5 @@ def process_document(
         ),
         source_total_pages=source_total_pages,
         filtered_pdf=filtered_pdf,
+        searchable_pdf=searchable_pdf,
     )
