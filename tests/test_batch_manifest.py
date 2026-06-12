@@ -21,8 +21,9 @@ class BatchManifestTests(unittest.TestCase):
             "sha256": "abc",
         }
         self.settings = {
-            "pipeline_version": "3",
+            "pipeline_version": "4",
             "ocr_language": "kor+eng",
+            "filter_terms": [],
             "profiles": [],
         }
         self.manifest_path = self.document_dir / "manifest.json"
@@ -34,6 +35,7 @@ class BatchManifestTests(unittest.TestCase):
                     "settings": self.settings,
                     "result": {
                         "total_pages": 1,
+                        "source_total_pages": 1,
                         "verified_json": "json/result.json",
                         "warning_count": 0,
                         "review_required_pages": 0,
@@ -89,6 +91,15 @@ class BatchManifestTests(unittest.TestCase):
             self.manifest_path,
             self.fingerprint,
             self.settings,
+        )
+        self.assertIsNone(manifest)
+
+    def test_reprocesses_when_filter_terms_change(self) -> None:
+        changed_settings = {**self.settings, "filter_terms": ["invoice"]}
+        manifest = load_reusable_manifest(
+            self.manifest_path,
+            self.fingerprint,
+            changed_settings,
         )
         self.assertIsNone(manifest)
 

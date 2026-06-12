@@ -26,6 +26,16 @@
         </label>
 
         <div id="file-list" class="file-list" aria-live="polite"></div>
+        <label class="filter-field" for="filter-words">
+          <strong>Page filter words (optional)</strong>
+          <textarea
+            id="filter-words"
+            name="filter_words"
+            rows="3"
+            placeholder="invoice, approved&#10;Separate words with commas or new lines"
+          ></textarea>
+          <small>Only pages containing at least one word will remain in the filtered PDF.</small>
+        </label>
         <button id="submit-button" type="submit">Convert and run OCR</button>
 
         <div id="progress-wrap" class="progress-wrap hidden">

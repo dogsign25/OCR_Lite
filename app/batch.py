@@ -12,6 +12,7 @@ from app.services.document_processor import PIPELINE_VERSION, process_document
 from app.services.json_writer import write_ocr_result
 from app.services.naming import safe_stem
 from app.services.ocr_service import OCR_PROFILES
+from app.services.page_filter import normalize_filter_terms
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,9 @@ class BatchItem:
     output_directory: str
     status: str
     total_pages: int = 0
+    source_total_pages: int = 0
     verified_json: str = ""
+    filtered_pdf: str = ""
     warning_count: int = 0
     review_required_pages: int = 0
     error: str = ""
@@ -66,6 +69,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Reprocess PDFs whose verified JSON already exists",
     )
+    parser.add_argument(
+        "--filter-word",
+        action="append",
+        default=[],
+        help=(
+            "Keep only pages containing this OCR text. "
+            "Repeat the option to register multiple words."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -96,7 +108,12 @@ def assign_output_names(pdf_paths: list[Path], input_dir: Path) -> dict[Path, st
 
 
 def clear_generated_files(document_dir: Path) -> None:
-    for pattern in ("images/*.png", "json/*.json", "manifest.json"):
+    for pattern in (
+        "images/*.png",
+        "json/*.json",
+        "*.filtered.pdf",
+        "manifest.json",
+    ):
         for path in document_dir.glob(pattern):
             path.unlink()
 
@@ -113,10 +130,14 @@ def source_fingerprint(pdf_path: Path) -> dict[str, object]:
     }
 
 
-def pipeline_settings(language: str) -> dict[str, object]:
+def pipeline_settings(
+    language: str,
+    filter_terms: tuple[str, ...] = (),
+) -> dict[str, object]:
     return {
         "pipeline_version": PIPELINE_VERSION,
         "ocr_language": language,
+        "filter_terms": list(normalize_filter_terms(filter_terms)),
         "profiles": [
             {"name": profile.name, "config": profile.config}
             for profile in OCR_PROFILES
@@ -143,6 +164,7 @@ def load_reusable_manifest(
         output_files = result["output_files"]
         required_fields = (
             "total_pages",
+            "source_total_pages",
             "verified_json",
             "warning_count",
             "review_required_pages",
@@ -155,9 +177,21 @@ def load_reusable_manifest(
             return None
         if str(result["verified_json"]) not in output_files:
             return None
-        for field in ("total_pages", "warning_count", "review_required_pages"):
+        filtered_pdf = result.get("filtered_pdf", "")
+        if filtered_pdf and str(filtered_pdf) not in output_files:
+            return None
+        if settings.get("filter_terms") and not filtered_pdf:
+            return None
+        for field in (
+            "total_pages",
+            "source_total_pages",
+            "warning_count",
+            "review_required_pages",
+        ):
             if not isinstance(result[field], int) or result[field] < 0:
                 return None
+        if result["total_pages"] > result["source_total_pages"]:
+            return None
         for relative_name in output_files:
             candidate = (document_dir / relative_name).resolve()
             if not candidate.is_relative_to(document_dir) or not candidate.is_file():
@@ -173,6 +207,7 @@ def process_batch_item(
     output_name: str,
     language: str,
     overwrite: bool,
+    filter_terms: tuple[str, ...] = (),
 ) -> BatchItem:
     document_dir = output_root / output_name
     image_dir = document_dir / "images"
@@ -181,7 +216,7 @@ def process_batch_item(
 
     try:
         fingerprint = source_fingerprint(pdf_path)
-        settings = pipeline_settings(language)
+        settings = pipeline_settings(language, filter_terms)
         manifest = (
             None
             if overwrite
@@ -194,7 +229,13 @@ def process_batch_item(
                 output_directory=str(document_dir),
                 status="skipped",
                 total_pages=int(result["total_pages"]),
+                source_total_pages=int(result["source_total_pages"]),
                 verified_json=str(document_dir / str(result["verified_json"])),
+                filtered_pdf=(
+                    str(document_dir / str(result["filtered_pdf"]))
+                    if result.get("filtered_pdf")
+                    else ""
+                ),
                 warning_count=int(result["warning_count"]),
                 review_required_pages=int(result["review_required_pages"]),
             )
@@ -207,13 +248,17 @@ def process_batch_item(
             base_name=output_name,
             source_name=pdf_path.name,
             ocr_language=language,
+            filter_terms=filter_terms,
+            filtered_pdf_path=document_dir / f"{output_name}.filtered.pdf",
+        )
+        generated_paths = (
+            [*processed.image_paths]
+            + [output.path for output in processed.json_outputs]
+            + ([processed.filtered_pdf] if processed.filtered_pdf else [])
         )
         output_files = [
             str(path.relative_to(document_dir))
-            for path in (
-                [*processed.image_paths]
-                + [output.path for output in processed.json_outputs]
-            )
+            for path in generated_paths
         ]
         manifest_payload = {
             "status": "completed",
@@ -221,8 +266,14 @@ def process_batch_item(
             "settings": settings,
             "result": {
                 "total_pages": processed.total_pages,
+                "source_total_pages": processed.source_total_pages,
                 "verified_json": str(
                     processed.verified_json.relative_to(document_dir)
+                ),
+                "filtered_pdf": (
+                    str(processed.filtered_pdf.relative_to(document_dir))
+                    if processed.filtered_pdf
+                    else ""
                 ),
                 "warning_count": len(processed.warnings),
                 "review_required_pages": processed.review_required_pages,
@@ -244,7 +295,9 @@ def process_batch_item(
         output_directory=str(document_dir),
         status="completed",
         total_pages=processed.total_pages,
+        source_total_pages=processed.source_total_pages,
         verified_json=str(processed.verified_json),
+        filtered_pdf=str(processed.filtered_pdf or ""),
         warning_count=len(processed.warnings),
         review_required_pages=processed.review_required_pages,
     )
@@ -280,6 +333,7 @@ def main() -> int:
         raise SystemExit(f"No PDF files found in: {input_dir}")
 
     output_names = assign_output_names(pdf_paths, input_dir)
+    filter_terms = normalize_filter_terms(args.filter_word)
     print(
         f"Processing {len(pdf_paths)} PDF file(s) with "
         f"{args.workers} worker(s)..."
@@ -295,6 +349,7 @@ def main() -> int:
                 output_names[pdf_path],
                 args.language,
                 args.overwrite,
+                filter_terms,
             ): pdf_path
             for pdf_path in pdf_paths
         }

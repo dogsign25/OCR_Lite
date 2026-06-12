@@ -1,6 +1,7 @@
 const form = document.querySelector("#upload-form");
 const fileInput = document.querySelector("#pdf-files");
 const fileList = document.querySelector("#file-list");
+const filterWords = document.querySelector("#filter-words");
 const dropZone = document.querySelector("#drop-zone");
 const submitButton = document.querySelector("#submit-button");
 const progressWrap = document.querySelector("#progress-wrap");
@@ -81,8 +82,13 @@ function showResults(results) {
     const meta = document.createElement("p");
     meta.className = "result-meta";
     const reviewCount = result.review_required_pages || 0;
-    meta.textContent = `${result.total_pages} page${result.total_pages === 1 ? "" : "s"} processed`
-      + (reviewCount ? `, ${reviewCount} page${reviewCount === 1 ? "" : "s"} need review` : "");
+    const wasFiltered = Boolean(result.filtered_pdf);
+    meta.textContent = wasFiltered
+      ? `${result.total_pages} of ${result.source_total_pages} pages retained`
+      : `${result.total_pages} page${result.total_pages === 1 ? "" : "s"} processed`;
+    meta.textContent += reviewCount
+      ? `, ${reviewCount} page${reviewCount === 1 ? "" : "s"} need review`
+      : "";
 
     const jsonLinks = document.createElement("div");
     jsonLinks.className = "json-links";
@@ -111,7 +117,17 @@ function showResults(results) {
       imageLinks.append(link);
     });
 
-    card.append(title, meta, jsonLinks, imageLinks);
+    card.append(title, meta);
+
+    if (result.filtered_pdf) {
+      const pdfLink = document.createElement("a");
+      pdfLink.className = "download-pdf";
+      pdfLink.href = result.filtered_pdf.download_url;
+      pdfLink.textContent = `Filtered PDF (${result.filtered_pdf.filename})`;
+      card.append(pdfLink);
+    }
+
+    card.append(jsonLinks, imageLinks);
 
     if (result.warnings.length) {
       const warnings = document.createElement("p");
@@ -137,6 +153,7 @@ form.addEventListener("submit", (event) => {
 
   const formData = new FormData();
   [...fileInput.files].forEach((file) => formData.append("files", file));
+  formData.append("filter_words", filterWords.value);
 
   submitButton.disabled = true;
   progressWrap.classList.remove("hidden");

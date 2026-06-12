@@ -147,6 +147,33 @@ h1 {
   color: var(--muted);
 }
 
+.filter-field {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.filter-field textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  background: #fff;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.filter-field textarea:focus {
+  border-color: var(--accent);
+  outline: 3px solid rgba(37, 99, 235, 0.12);
+}
+
+.filter-field small {
+  color: var(--muted);
+}
+
 button {
   width: 100%;
   margin-top: 18px;
@@ -239,6 +266,17 @@ button:disabled {
   border-radius: 9px;
   color: #fff;
   background: var(--success);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.download-pdf {
+  display: inline-flex;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 9px;
+  color: #fff;
+  background: var(--accent);
   font-weight: 700;
   text-decoration: none;
 }

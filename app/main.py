@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -13,16 +13,18 @@ from starlette.concurrency import run_in_threadpool
 
 from app.services.document_processor import process_document
 from app.services.naming import safe_stem
+from app.services.page_filter import parse_filter_terms
 from app.services.pdf_converter import PdfConversionError
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 IMAGE_DIR = BASE_DIR / "outputs" / "images"
 JSON_DIR = BASE_DIR / "outputs" / "json"
+PDF_DIR = BASE_DIR / "outputs" / "pdfs"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 OCR_LANGUAGE = os.getenv("OCR_LANGUAGE", "kor+eng")
 
-for directory in (UPLOAD_DIR, IMAGE_DIR, JSON_DIR):
+for directory in (UPLOAD_DIR, IMAGE_DIR, JSON_DIR, PDF_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="PDF to PNG OCR", version="1.0.0")
@@ -35,7 +37,7 @@ def reserve_upload(filename: str) -> tuple[str, Path]:
     while True:
         occupied_outputs = any(JSON_DIR.glob(f"{base}*.json")) or any(
             IMAGE_DIR.glob(f"{base}(?*")
-        )
+        ) or any(PDF_DIR.glob(f"{base}*.pdf"))
         candidate = f"{base}_{uuid4().hex[:8]}" if occupied_outputs else base
         destination = UPLOAD_DIR / f"{candidate}.pdf"
         try:
@@ -50,6 +52,8 @@ def cleanup_web_outputs(base_name: str) -> None:
     for path in IMAGE_DIR.glob(f"{base_name}(*)"):
         path.unlink(missing_ok=True)
     for path in JSON_DIR.glob(f"{base_name}*.json"):
+        path.unlink(missing_ok=True)
+    for path in PDF_DIR.glob(f"{base_name}*.pdf"):
         path.unlink(missing_ok=True)
 
 
@@ -89,6 +93,7 @@ async def index(request: Request):
 @app.post("/api/process")
 async def process_pdfs(
     files: Annotated[list[UploadFile] | None, File()] = None,
+    filter_words: Annotated[str, Form()] = "",
 ) -> dict[str, object]:
     if not files:
         raise HTTPException(status_code=400, detail="Select at least one PDF file.")
@@ -103,6 +108,7 @@ async def process_pdfs(
         )
 
     results: list[dict[str, object]] = []
+    filter_terms = parse_filter_terms(filter_words)
     for upload in files:
         original_name = Path(upload.filename or "document.pdf").name
         base_name, saved_pdf = reserve_upload(original_name)
@@ -117,6 +123,8 @@ async def process_pdfs(
                 base_name=base_name,
                 source_name=original_name,
                 ocr_language=OCR_LANGUAGE,
+                filter_terms=filter_terms,
+                filtered_pdf_path=PDF_DIR / f"{base_name}.filtered.pdf",
             )
             json_outputs = [
                 {
@@ -133,6 +141,7 @@ async def process_pdfs(
                     "source_pdf": original_name,
                     "saved_pdf": saved_pdf.name,
                     "total_pages": processed.total_pages,
+                    "source_total_pages": processed.source_total_pages,
                     "images": [
                         {
                             "filename": path.name,
@@ -147,6 +156,17 @@ async def process_pdfs(
                     "json_files": json_outputs,
                     "warnings": processed.warnings,
                     "review_required_pages": processed.review_required_pages,
+                    "filter_terms": list(filter_terms),
+                    "filtered_pdf": (
+                        {
+                            "filename": processed.filtered_pdf.name,
+                            "download_url": (
+                                f"/download/pdf/{processed.filtered_pdf.name}"
+                            ),
+                        }
+                        if processed.filtered_pdf
+                        else None
+                    ),
                 }
             )
         except HTTPException as exc:
@@ -200,3 +220,9 @@ async def download_json(filename: str):
 async def download_image(filename: str):
     path = file_from_directory(IMAGE_DIR, filename)
     return FileResponse(path, media_type="image/png", filename=path.name)
+
+
+@app.get("/download/pdf/{filename}")
+async def download_pdf(filename: str):
+    path = file_from_directory(PDF_DIR, filename)
+    return FileResponse(path, media_type="application/pdf", filename=path.name)
